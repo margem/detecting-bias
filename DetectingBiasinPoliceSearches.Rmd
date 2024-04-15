@@ -1,0 +1,825 @@
+---
+title: "DetectingBiasinTrafficSearches"
+author: "Maggie Meyer"
+date: "2023-12-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+if(!("pacman" %in% installed.packages()[,"Package"])) install.packages("pacman")
+library(pacman)
+p_load("tidyverse","rgl", "webshot2", "plotly","reticulate","gganimate","RColorBrewer", "stringr")
+
+path.to.data <- "/Users/maggiemeyer/Dropbox (University of Michigan)/Stanford Open Policing Data/Data for Bias Paper/"
+path.to.figures <- "/Users/maggiemeyer/Dropbox (University of Michigan)/Apps/Overleaf/Bias in Searches, Meyer & Gonzalez (2022)/"
+
+
+D_data <- data.frame(read.csv(paste0(path.to.data, "Durham.csv"), header = T, sep=","))
+s_data <- readRDS(paste0(path.to.data, "combined.data.rds"))
+local_data <- readRDS(paste0(path.to.data, "non_state_patrol_combined.rds"))
+
+knitr::knit_hooks$set(webgl = hook_webgl)
+options(rgl.useNULL = TRUE)
+setupKnitr(autoprint = TRUE)
+```
+
+
+```{r, echo=F}
+## This section has all the utility functions necessary to produce the plots in our manuscript. 
+#1 - two_by_two
+##Obtain the 2x2 contingency table for any data frame.
+two_by_two <- function(data.frame){
+  
+  searches = plyr::count(data.frame$search_conducted)[2,2]
+  no.searches = plyr::count(data.frame$search_conducted)[1,2]
+  contraband = plyr::count(data.frame$contraband_found)[2,2]
+  no.contraband = plyr::count(data.frame$contraband_found)[1,2]
+  
+  tab <- matrix(c(contraband,
+                  no.contraband,
+                  searches,
+                  "x",
+                  "y",
+                  no.searches,
+                  "total contraband",
+                  "total no contraband",
+                  (searches + no.searches)),ncol=3, byrow=TRUE)
+  colnames(tab) <- c('Contraband','No Contraband','Total')
+  rownames(tab) <- c('Search','No Search','Total')
+  tab <- as.table(tab)
+  
+  print(tab)
+}
+
+#2 - extract.metrics
+##Obtain the values from any dataframe that will be used for further computations
+extract.metrics <- function(data.frame, name){
+  state <- vector()
+  
+  t_searches = plyr::count(data.frame$search_conducted)[2,2]
+  t_no.searches = plyr::count(data.frame$search_conducted)[1,2]
+  t_contraband = plyr::count(data.frame$contraband_found)[2,2]
+  t_no.contraband = plyr::count(data.frame$contraband_found)[1,2]
+  
+  white.data = data.frame%>%
+    filter(subject_race == "white")
+  black.data = data.frame%>%
+    filter(subject_race == "black")
+  
+  w_searches = plyr::count(white.data$search_conducted)[2,2]
+  w_no.searches = plyr::count(white.data$search_conducted)[1,2]
+  w_contraband = plyr::count(white.data$contraband_found)[2,2]
+  w_no.contraband = plyr::count(white.data$contraband_found)[1,2]
+  
+  b_searches = plyr::count(black.data$search_conducted)[2,2]
+  b_no.searches = plyr::count(black.data$search_conducted)[1,2]
+  b_contraband = plyr::count(black.data$contraband_found)[2,2]
+  b_no.contraband = plyr::count(black.data$contraband_found)[1,2]
+  
+  PPV.b = b_contraband/b_searches
+  PPV.w = w_contraband/w_searches
+  PPV = t_contraband/t_searches
+  
+  S.b = b_searches/(b_searches + b_no.searches)
+  S.w = w_searches/(w_searches + w_no.searches)
+  S = t_searches/(t_searches + t_no.searches)
+  
+  metrics <- data.frame(t_searches, t_no.searches, t_contraband, t_no.contraband, PPV, S, 
+                        w_searches, w_no.searches, w_contraband, w_no.contraband, PPV.w, S.w, 
+                        b_searches, b_no.searches, b_contraband, b_no.contraband, PPV.b, S.b)
+  metrics$state <-   substring(name, 1, 2)
+  
+  #address NAs 
+  ifelse(!is.na(metrics),0,metrics)
+  return(metrics)
+}
+
+#3 - metrics.contraband
+##Obtain the full set of feasible contraband and hit rates.
+metrics.contraband <- function(data.frame){
+  
+  contraband.rate <- seq(0, 1, .01)  
+  
+  b.searches = sum(data.frame$b_searches)
+  b.no.searches = sum(data.frame$b_no.searches)
+  b.contraband = sum(data.frame$b_contraband)
+  b.no.contraband = sum(data.frame$b_no.contraband)
+  
+  b.total.stops = (b.searches + b.no.searches)
+  b.search.rate = (b.searches/b.total.stops)
+  b.max = b.no.searches * (b.contraband/b.searches)
+  
+ #get fa rates 
+  p.hit.black <- vector()
+  p.fa.black <- vector()
+  xvalue.black <- vector()
+  search.rate.black <- vector()
+  for(i in 1:length(contraband.rate)){
+    xvalue.black[i] <- (contraband.rate[i]*b.total.stops - b.contraband)
+    p.hit.black[i] <- b.contraband/(b.contraband +xvalue.black[i])
+    p.fa.black[i] <- b.no.contraband/(b.no.contraband + (b.no.searches) - xvalue.black[i])
+    }
+    
+  w.searches = sum(data.frame$w_searches) 
+  w.no.searches = sum(data.frame$w_no.searches)
+  w.contraband = sum(data.frame$w_contraband)
+  w.no.contraband = sum(data.frame$w_no.contraband)
+  
+  w.total.stops = (w.searches + w.no.searches)
+  w.search.rate = (w.searches/w.total.stops)
+  w.max = w.no.searches * (w.contraband/w.searches)
+  
+  #sequence
+  p.hit.white <- vector()
+  p.fa.white <- vector()
+  xvalue.white <- vector()
+  contraband.rate.white <- vector()
+  for(i in 1:length(contraband.rate)){
+    xvalue.white[i] <- (contraband.rate[i]*w.total.stops - w.contraband)
+    p.hit.white[i] <- w.contraband/(w.contraband +xvalue.white[i])
+    p.fa.white[i] <- w.no.contraband/(w.no.contraband + (w.no.searches) - xvalue.white[i])}
+    
+  bias.fa <- vector()
+  bias.hr <- vector()
+  bias <-  vector()
+  fa.diff <- vector()
+  hr.diff <- vector()
+  for(i in 1:length(contraband.rate)){
+    bias.fa[i] <-  ifelse(p.fa.white[i] < p.fa.black[i], TRUE, FALSE)
+    bias.hr[i] <- ifelse(p.hit.black[i] > p.hit.white[i] , TRUE, FALSE)
+  bias[i] <- ifelse(bias.fa[i] == TRUE | bias.hr[i] == TRUE, TRUE, FALSE)
+  fa.diff[i] <- p.fa.white[i] - p.fa.black[i]
+  hr.diff[i] <-  p.hit.white[i] - p.hit.black[i]
+  }
+  
+  
+  temp <- data.frame(contraband.rate, xvalue.white, xvalue.black, p.hit.white, p.hit.black, p.fa.white, p.fa.black, w.max, b.max, fa.diff, hr.diff, bias.hr, bias.fa, bias)
+  
+    for(i in 1:length(contraband.rate)){
+    if(1 > temp$xvalue.white[i] |temp$xvalue.white[i] > w.max){temp$p.fa.white[i] <- NA}
+    if(1 > temp$xvalue.black[i] |temp$xvalue.black[i] > b.max){temp$p.fa.black[i] <- NA}
+    }
+
+  return(temp)
+}
+```
+
+
+# Main Analyses
+
+##  Durham 
+
+This section produces the table "Estimating the 2x2 Table in Durham NC" and its corresponding upper bound on x. 
+```{r Durham 2x2, echo = FALSE, warning=F}
+two_by_two(D_data)
+D_two_by_two <- as.numeric(two_by_two(D_data))
+x <- D_two_by_two[8]*(D_two_by_two[1]/(D_two_by_two[4]+ D_two_by_two[1]))
+x
+```
+
+This section produces the tables "Durham NC 2x2 Table by Race" and their corresponding upper bound on x.
+```{r, echo=F}
+white.data <- D_data %>% filter(subject_race == "white")
+two_by_two(white.data)
+black.data <- D_data %>% filter(subject_race == "black")
+two_by_two(black.data)
+
+#to get the upper bound on x, we use the extract metrics function which does this automatically
+D.metrics <- metrics.contraband(extract.metrics(D_data, "NC"))
+D.metrics$w.max
+D.metrics$b.max
+```
+
+
+### 3D Surfaces
+
+Next we make 3D surfaces of all feasible hit and false alarm rates in Durham NC. This section reproduces the plot Durham NC, Data (Tab. 4): Racial Difference in Hit Rate (left) and False Alarm Rate (right) for all Possible Combinations of x-values. 
+```{r Durham 3D, echo=F}
+#this is some pre-processing
+white.data <- D_data %>% filter(subject_race == "white")
+white.search = plyr::count(white.data$search_conducted)[2,2]
+white.nosearch = plyr::count(white.data$search_conducted)[1,2]
+white.hit = plyr::count(white.data$contraband_found)[2,2]
+white.fa = plyr::count(white.data$contraband_found)[1,2] 
+w.max = white.nosearch * white.hit/white.search
+x.white <- seq(1,w.max-1, length.out=100)
+  
+black.data <- D_data %>% filter(subject_race == "black")
+black.search = plyr::count(black.data$search_conducted)[2,2]
+black.nosearch = plyr::count(black.data$search_conducted)[1,2]
+black.hit = plyr::count(black.data$contraband_found)[2,2]
+black.fa = plyr::count(black.data$contraband_found)[1,2]
+b.max = black.nosearch * black.hit/black.search
+x.black <- seq(1,b.max-1, length.out=100)
+
+f.bias.hr <- function(x,y) {
+  white.hr <- white.hit/(white.hit+x)           
+     black.hr <- black.hit/(black.hit+y)
+     
+     bias <- white.hr - black.hr}
+     
+hits <- outer(x.white, x.black, f.bias.hr)
+
+f.bias.fa <- function(x,y) {
+  white.fa.rate <- white.fa/(white.fa + white.nosearch-x)          
+     black.fa.rate <- black.fa/(black.nosearch + black.fa - y)
+     
+     bias <- white.fa.rate - black.fa.rate}
+     
+falsealarms <- outer(x.white, x.black, f.bias.fa)
+
+#this generates the plot with the perspective we used in the manuscript
+col <- "rgb(255,255,255)"
+eye1 <- list(x = -1.64, y = -2.4, z= .8)
+#need transpose the matrix to make everything line up
+phit <- plot_ly(scene="scene1", z= ~t(hits), z = .28,x = ~x.white, y = ~x.black) %>% 
+  add_surface(showscale=FALSE) %>%
+  add_surface(z=~matrix(0,100,100),showscale=FALSE, color=I("gray50")) %>% 
+  layout(
+    scene1 = list(xaxis = list(title = "x white", 
+                                    showspikes = FALSE, 
+                                    backgroundcolor=col,
+                                    showbackground=TRUE,
+                                    gridcolor="black",
+                                    pagecolor=col), 
+                       yaxis = list(title = "x black",
+                                    showspikes = FALSE,
+                                    backgroundcolor=col,
+                                    gridcolor="black",
+                                    pagecolor=col,
+                                    showbackground=TRUE, autotick=F, tickmode="array", 
+                                    tickvals=c(10000,20000,30000,40000)), 
+                       zaxis = list(title = "racial difference", 
+                                    showspikes = FALSE,
+                                    backgroundcolor=col,
+                                    showbackground=TRUE,
+                                    gridcolor="black",
+                                    pagecolor=col, autotick=F, tickmode="array", tickvals=c(.5,0,-.5),range=c(-1,1)), 
+                       camera=list(eye=eye1)),
+    title = list(text="Hit Rate",y=0.8))
+
+#fa
+eye2 <- list(x = 1.55, y = 2.04, z = .28)
+eye2 <- list(x = -1.64, y = -2.4, z= .8)
+
+#need transpose the matrix to make everything line up
+
+pfa <- plot_ly(scene="scene2", z= ~t(falsealarms),x = ~x.white, y = ~x.black) %>% add_surface(showscale=FALSE) %>%
+  add_surface(z=~matrix(0,nrow(falsealarms),ncol(falsealarms)),showscale=FALSE, color=I("gray50")) %>%
+    layout(scene2 = list(
+      xaxis = list(title = "x white", 
+                   showspikes=FALSE,
+                   backgroundcolor=col,
+                   showbackground=TRUE,
+                   gridcolor="black",
+                   pagecolor=col), 
+      yaxis = list(title = "x black",showspikes=FALSE,
+                   backgroundcolor=col,
+                   gridcolor="black",
+                   pagecolor=col,
+                   showbackground=TRUE, autotick=F, tickmode="array", 
+                                    tickvals=c(10000,20000,30000,40000)), 
+      zaxis = list(title = "racial difference", 
+                   showspikes=FALSE,
+                   backgroundcolor=col,
+                   showbackground=TRUE,
+                   gridcolor="black",
+                   pagecolor=col, autotick=F, tickmode="array", tickvals=c(0,-.02,-.04), range=c(-.06,0)), 
+      camera=list(eye=eye1)),
+    title = list(text="False Alarm Rate",y=0.8),
+      paper_bgcolor = col,
+      plot_bgcolor = col)
+
+axx <- list(
+  gridcolor='rgb(0, 0, 0)',
+  zerolinecolor='rgb(0, 0, 0)',
+  showbackground=TRUE,
+  backgroundcolor='rgb(255, 255, 255)'
+)
+
+#do side by side in latex
+# save_image(phit, file="./phit.png", scale=2, width=612, height=792)
+# save_image(pfa, file="./pfa.png", scale=2, width=612, height=792)
+
+#for html version
+#htmlwidgets::saveWidget(as_widget(phit), "phit.html")
+#htmlwidgets::saveWidget(as_widget(pfa), "pfa.html")
+
+pfa
+phit
+```
+
+### Single Blob Plot for Durham NC
+
+This section reproduces the plot "Durham, NC Data (Tab. 4): Graphical Representation of the Overlapping Condition Test"
+```{r, echo=F}
+temp <- metrics.contraband(extract.metrics(D_data, "NC"))
+temp <- temp %>% mutate(minb=min(p.fa.black, na.rm = T),maxb=max(p.fa.black, na.rm = T),minw=min(p.fa.white, na.rm = T),maxw=max(p.fa.white, na.rm = T)) %>% ungroup()
+
+temp$location <- rep("Durham", 101)
+
+durham.blob <- 
+ggplot(temp, aes(x=p.fa.white,y=p.fa.black,fill=location)) +
+     geom_rect(aes(xmin=minw,xmax=maxw, ymin=minb,ymax=maxb)) + ylim(0,.1) + xlim(0,.1) + geom_abline() + 
+  xlab("Feasible FA Rate for White Drivers") + ylab("Feasible FA Rate for Black Drivers")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"), plot.background = element_rect(fill='transparent', color=NA),
+axis.text = element_text(size = 10))
+
+# ggsave(
+#     paste0(path.to.figures,"durham_blob.pdf"),
+#     durham.blob,
+#     dpi = 1200
+#   )
+
+durham.blob
+```
+
+### Stop Reasons
+
+This section reproduces the Figure: "Durham, NC Data: Overlapping Condition Test for Stop Reason"
+```{r, echo=F}
+#create dataframes for each reason
+checkpoint <- D_data %>% filter(reason_for_stop == "Checkpoint")
+impaired <- D_data %>% filter(reason_for_stop == "Driving While Impaired")
+investigation <- D_data %>% filter(reason_for_stop == "Investigation")
+other <- D_data %>% filter(reason_for_stop == "Other Motor Vehicle Violation")
+safe <- D_data %>% filter(reason_for_stop == "Safe Movement Violation")
+seat.belt <- D_data %>% filter(reason_for_stop == "Seat Belt Violation")
+speed <- D_data %>% filter(reason_for_stop == "Speed Limit Violation")
+stop <- D_data %>% filter(reason_for_stop == "Stop Light/Sign Violation")
+equipment <- D_data %>% filter(reason_for_stop == "Vehicle Equipment Violation")
+regulatory <- D_data %>% filter(reason_for_stop == "Vehicle Regulatory Violation")
+
+
+checkpoint.useful <- metrics.contraband(extract.metrics(checkpoint, "checkpoint"))
+impaired.useful <- metrics.contraband(extract.metrics(impaired, "impaired"))
+investigation.useful <- metrics.contraband(extract.metrics(investigation, "investigation"))
+other.useful <- metrics.contraband(extract.metrics(other, "other"))
+safe.useful <- metrics.contraband(extract.metrics(safe, "safe"))
+seat.belt.useful <- metrics.contraband(extract.metrics(seat.belt, "seat belt"))
+speed.useful <- metrics.contraband(extract.metrics(speed, "speed"))
+stop.useful <- metrics.contraband(extract.metrics(stop, "stop"))
+equipment.useful <- metrics.contraband(extract.metrics(equipment, "equipment"))
+regulatory.useful <- metrics.contraband(extract.metrics(regulatory, "regulatory"))
+
+temp <- bind_rows(checkpoint.useful,
+                         impaired.useful,
+                         investigation.useful,
+                         other.useful,
+                         safe.useful,
+                         seat.belt.useful,
+                         speed.useful,
+                         stop.useful,
+                         equipment.useful,
+                         regulatory.useful)
+
+temp$reason <- rep(c("Checkpoint",
+                    "Driving While Impaired",
+                    "Investigation",
+                    "Other Motor Vehicle Violation",
+                    "Safe Movement Violation",
+                    "Seat Belt Violation",
+                    "Speed Limit Violation",
+                    "Stop Light/Sign Violation",
+                    "Vehicle Equipment Violation",
+                    "Vehicle Regulatory Violation"),each = 101)
+
+temp <- temp %>% group_by(reason) %>% mutate(minb=min(p.fa.black, na.rm = T),maxb=max(p.fa.black, na.rm = T),minw=min(p.fa.white, na.rm = T),maxw=max(p.fa.white, na.rm = T)) %>% ungroup()
+
+stop.plot <- ggplot(temp, 
+                    aes(x=p.fa.white,y=p.fa.black,fill=reason)) +
+  geom_rect(aes(xmin=minw,xmax=maxw, ymin=minb,ymax=maxb)) +
+  ylim(0,.2) + 
+  xlim(0,.2) + 
+  geom_abline() + 
+  xlab("Feasible FA Rate for White Drivers") + 
+  ylab("Feasible FA Rate for Black Drivers")+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        plot.background = element_rect(fill='transparent', color=NA),
+        axis.text = element_text(size = 10),
+        legend.text = element_text(size = 5),
+        legend.key.size = unit(0.5, "cm"),
+        legend.title = element_text(size = 10))
+
+# ggsave(
+#     paste0(path.to.figures,"stop.pdf"),
+#     stop.plot,
+#     dpi = 1200
+#   )
+
+stop.plot
+```
+
+
+### Search Reasons
+
+This section reproduces the Figure: "Durham, NC Data: Overlapping Condition Test for Search Reason"
+```{r, echo=F, warning=F}
+#this function has a fixed no search value 
+#it should only be used on Durham as it is borrowing the maximal no-search value for Black and White drivers (which is fixed)
+metrics.search.reason <- function(data.frame){
+  
+  contraband.rate <- seq(0, 1, .01)  
+
+  black.data = data.frame%>%
+    filter(subject_race == "black")
+  
+  b.searches = plyr::count(black.data$search_conducted)[1,2]
+  b.no.searches = 165469
+  b.contraband = plyr::count(black.data$contraband_found)[2,2]
+  b.no.contraband = plyr::count(black.data$contraband_found)[1,2]
+  
+  b.total.stops = (b.searches + b.no.searches)
+  b.search.rate = (b.searches/b.total.stops)
+  b.max = b.no.searches * (b.contraband/b.searches)
+
+ #get fa rates 
+  p.hit.black <- vector()
+  p.fa.black <- vector()
+  xvalue.black <- vector()
+  search.rate.black <- vector()
+  for(i in 1:length(contraband.rate)){
+    xvalue.black[i] <- (contraband.rate[i]*b.total.stops - b.contraband)
+    p.hit.black[i] <- b.contraband/(b.contraband +xvalue.black[i])
+    p.fa.black[i] <- b.no.contraband/(b.no.contraband + (b.no.searches) - xvalue.black[i])
+    }
+  
+  white.data = data.frame%>%
+  filter(subject_race == "white")
+  
+  w.searches = plyr::count(white.data$search_conducted)[1,2]
+  w.no.searches = 93893
+  w.contraband = plyr::count(white.data$contraband_found)[2,2]
+  w.no.contraband = plyr::count(white.data$contraband_found)[1,2]
+  
+  w.total.stops = (w.searches + w.no.searches)
+  w.search.rate = (w.searches/w.total.stops)
+  w.max = w.no.searches * (w.contraband/w.searches)
+  
+  #sequence
+  p.hit.white <- vector()
+  p.fa.white <- vector()
+  xvalue.white <- vector()
+  contraband.rate.white <- vector()
+  for(i in 1:length(contraband.rate)){
+    xvalue.white[i] <- (contraband.rate[i]*w.total.stops - w.contraband)
+    p.hit.white[i] <- w.contraband/(w.contraband +xvalue.white[i])
+    p.fa.white[i] <- w.no.contraband/(w.no.contraband + (w.no.searches) - xvalue.white[i])}
+    
+  bias.fa <- vector()
+  bias.hr <- vector()
+  bias <-  vector()
+  fa.diff <- vector()
+  hr.diff <- vector()
+  for(i in 1:length(contraband.rate)){
+    bias.fa[i] <-  ifelse(p.fa.white[i] < p.fa.black[i], TRUE, FALSE)
+    bias.hr[i] <- ifelse(p.hit.black[i] > p.hit.white[i] , TRUE, FALSE)
+  bias[i] <- ifelse(bias.fa[i] == TRUE | bias.hr[i] == TRUE, TRUE, FALSE)
+  fa.diff[i] <- p.fa.white[i] - p.fa.black[i]
+  hr.diff[i] <-  p.hit.white[i] - p.hit.black[i]
+  }
+  
+
+  temp <- data.frame(contraband.rate, xvalue.white, xvalue.black, p.hit.white, p.hit.black, p.fa.white, p.fa.black, fa.diff, hr.diff, bias.hr, bias.fa, bias)
+  
+
+    for(i in 1:length(contraband.rate)){
+    if(1 > temp$xvalue.white[i] |temp$xvalue.white[i] > w.max){temp$p.fa.white[i] <- NA}
+    if(1 > temp$xvalue.black[i] |temp$xvalue.black[i] > b.max){temp$p.fa.black[i] <- NA}
+    }
+  
+  return(temp)
+}
+
+suspicious.behavior <- metrics.search.reason(D_data %>% filter(str_detect(reason_for_search, "Erratic/Suspicious Behavior")))
+
+informant.tip <- metrics.search.reason(D_data %>% filter(str_detect(reason_for_search, "Informant Tip")))
+
+observation <- metrics.search.reason(D_data %>% filter(str_detect(reason_for_search, "Observation of Suspected Contraband")))
+
+other.info <- metrics.search.reason(D_data %>% filter(str_detect(reason_for_search, "Other Official Information")))
+
+sus.movement <- metrics.search.reason( D_data %>% filter(str_detect(reason_for_search, 'Suspicious Movement')))
+
+witness.obs <- metrics.search.reason(D_data %>% filter(str_detect(reason_for_search, "Witness Observation")))
+
+temp <- bind_rows(suspicious.behavior,
+                         informant.tip,
+                         observation,
+                         other.info,
+                         sus.movement,
+                         witness.obs)
+
+temp$reason <- rep(c("suspicious behavior",
+                     "informant tip",
+                     "observation",
+                     "other information",
+                     "suspicious movement",
+                     "witness observation"),each=101)
+
+temp <- temp %>% group_by(reason) %>% mutate(minb=min(p.fa.black, na.rm = T),maxb=max(p.fa.black, na.rm = T),minw=min(p.fa.white, na.rm = T),maxw=max(p.fa.white, na.rm = T)) %>% ungroup()
+
+search.plot <- ggplot(temp, aes(x=p.fa.white,y=p.fa.black,fill=reason)) +
+     geom_rect(aes(xmin=minw,xmax=maxw, ymin=minb,ymax=maxb)) + ylim(0,.04) + xlim(0,.04) + geom_abline() + 
+  xlab("Feasible FA Rate for White Drivers") + ylab("Feasible FA Rate for Black Drivers")+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+panel.background = element_blank(), axis.line = element_line(colour = "black"), plot.background = element_rect(fill='transparent', color=NA),
+axis.text = element_text(size = 10))
+
+# ggsave(
+#     paste0(path.to.figures,"search.pdf"),
+#     search.plot,
+#     dpi = 1200
+#   )
+
+search.plot
+```
+
+
+## State Analyses
+
+These metrics are presented in the main text body under the section "Analysis of 98 Million Traffic Stops Across 14 States". 
+```{r, echo=F}
+combined.state.metrics <- metrics.contraband(s_data)
+max.whitefa.state <- max(combined.state.metrics$p.fa.white, na.rm=T)
+min.blackfa.state <- min(combined.state.metrics$p.fa.black, na.rm=T)
+
+max.whitefa.state
+min.blackfa.state
+```
+
+
+This section produces the figure: "US State Patrol Data: Overlapping Condition Test for 14 US States"
+```{r, echo=F}
+s.metrics <- list()
+for(i in s_data$state){
+ s.metrics[i] <-list(metrics.contraband(s_data[s_data$state == i,]))
+}
+
+az <- s.metrics$az
+ca <- s.metrics$ca
+co <- s.metrics$co
+ct <- s.metrics$ct
+ma <- s.metrics$ma
+md <- s.metrics$md
+mo <- s.metrics$mo
+nc <- s.metrics$nc
+ri <- s.metrics$ri
+sc <- s.metrics$sc
+tx <- s.metrics$tx
+vt <- s.metrics$vt
+wa <- s.metrics$wa
+wi <- s.metrics$wi
+
+
+state.data <- bind_rows(az, ca, co, ct, ma, md, mo, nc, ri, sc, tx, vt, wa, wi)
+state.data$state <- rep(c("AZ","CA","CO","CT","MA","MD","MO","NC","RI","SC","TX","VT","WA","WI"),each=101)
+
+
+state.data <- state.data %>% group_by(state) %>% mutate(minb=min(p.fa.black, na.rm = T),maxb=max(p.fa.black, na.rm = T),minw=min(p.fa.white, na.rm = T),maxw=max(p.fa.white, na.rm = T)) %>% ungroup()
+
+state.plot <- ggplot(state.data,aes(x=p.fa.white,y=p.fa.black,fill=state)) +
+  geom_rect(aes(xmin=minw,xmax=maxw, ymin=minb,ymax=maxb)) +
+  ylim(0,.3) + 
+  xlim(0,.3) + 
+  geom_abline() + 
+  xlab("Feasible FA Rate for White Drivers") + 
+  ylab("Feasible FA Rate for Black Drivers")+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        plot.background = element_rect(fill='transparent', color=NA),
+        axis.text = element_text(size = 10),
+        legend.text = element_text(size = 5),
+        legend.key.size = unit(0.5, "cm"),
+        legend.title = element_text(size = 10))
+
+# ggsave(
+#     paste0(path.to.figures,"state.pdf"),
+#     state.plot,
+#     dpi = 1200
+#   )
+
+state.plot
+```
+
+
+
+## Insights from the 2x2 Table
+```{r, echo=F}
+#generate example data
+white.hit.o <- 4
+white.fa.o <- 23 
+white.search.o <- 27
+white.nosearch.o <- 73    
+white.max.o <- white.nosearch.o * white.hit.o/(white.hit.o + white.fa.o)
+  
+black.hit.o <- 40
+black.fa.o <- 5
+black.search.o <- 45
+black.nosearch.o <- 55
+black.max.o <- black.nosearch.o * black.hit.o/(black.search.o)
+
+x.black.o <- seq(1: black.max.o)
+x.white.o <- seq(1: white.max.o)
+
+f.bias.hr.o <- function(x,y) {
+  white.hr <- white.hit.o/(white.hit.o+x)           
+     black.hr <- black.hit.o/(black.hit.o+y)
+     
+     bias <- white.hr - black.hr}
+hits.o <- outer(x.white.o, x.black.o, f.bias.hr.o)
+
+f.bias.fa.o <- function(x,y) {
+  white.fa.rate <- white.fa.o/(white.fa.o + white.nosearch.o-x)          
+     black.fa.rate <- black.fa.o/(black.nosearch.o + black.fa.o - y)
+     
+     bias <- white.fa.rate - black.fa.rate}
+falsealarms.o <- outer(x.white.o, x.black.o, f.bias.fa.o)
+
+#hit
+col <- "rgb(255,255,255)"
+eye1 <- list(x = -2.5, y = 1.4 , z = 1)
+
+phit.o <- plot_ly(scene="scene1", z=~t(hits.o)) %>% 
+  add_surface(showscale=FALSE,x = ~x.white.o, y = ~x.black.o) %>%
+  add_surface(z=~matrix(0,48,10),showscale=FALSE, color=I("gray50")) %>%
+  layout(
+    scene1 = list(xaxis = list(title = "x white", 
+                                    showspikes = FALSE, 
+                                    backgroundcolor=col,
+                                    showbackground=TRUE,
+                                    gridcolor="black",
+                                    pagecolor=col), 
+                       yaxis = list(title = "x black",
+                                    showspikes = FALSE,
+                                    backgroundcolor=col,
+                                    gridcolor="black",
+                                    pagecolor=col,
+                                    showbackground=TRUE), 
+                       zaxis = list(title = "racial difference", 
+                                    showspikes = FALSE,
+                                    backgroundcolor=col,
+                                    showbackground=TRUE,
+                                    gridcolor="black",
+                                    pagecolor=col, autotick=F, tickmode="array", tickvals=c(.3,0,-.5), range=c(-.7,.4)), 
+                       camera=list(eye=eye1)),
+    title = list(text="Hit Rate",y=0.8))
+
+eye2 <- list(x = -2.5, y = 1.4 , z = 1)
+
+pfa.o <- plot_ly(scene="scene1", z=~t(falsealarms.o)) %>% 
+  add_surface(showscale=FALSE,x = ~x.white.o, y = ~x.black.o) %>%
+  add_surface(z=~matrix(0,48,10),showscale=FALSE, color=I("gray50")) %>%
+  layout(
+    scene2 = list(xaxis = list(title = "x white", 
+                                    showspikes = FALSE, 
+                                    backgroundcolor=col,
+                                    showbackground=TRUE,
+                                    gridcolor="black",
+                                    pagecolor=col), 
+                       yaxis = list(title = "x black",
+                                    showspikes = FALSE,
+                                    backgroundcolor=col,
+                                    gridcolor="black",
+                                    pagecolor=col,
+                                    showbackground=TRUE), 
+                       zaxis = list(title = "racial difference", 
+                                    showspikes = FALSE,
+                                    backgroundcolor=col,
+                                    showbackground=TRUE,
+                                    gridcolor="black",
+                                    pagecolor=col, autotick=F, tickmode="array", tickvals=c(.1,0,-.1), range=c(-.25,.25)), 
+                       camera=list(eye=eye2)),
+    title = list(text="False Alarm Rate",y=0.8))
+
+
+# save_image(phit.o, file="./phit.o.png", scale=2, width=612, height=792)
+# save_image(pfa.o, file="./pfa.o.png", scale=2, width=612, height=792)
+
+#htmlwidgets::saveWidget(as_widget(phit.o), "phit-o.html")
+#htmlwidgets::saveWidget(as_widget(pfa.o), "pfa-o.html")
+
+pfa.o
+phit.o
+```
+
+
+# Supplemental Analyses
+
+This section produces the table: "Overlapping Condition Test Table for States"
+```{r, echo=F}
+s_data <- s_data %>% 
+  mutate(w.searchrate = w_searches/(w_searches +w_no.searches),
+                                    b.searchrate = b_searches/(b_searches + b_no.searches),
+                                    w_PPV = w_contraband/w_searches,
+                                    b_PPV = b_contraband/b_searches)
+#overlapping condition test
+state.data %>%
+  select(state, maxw, minb)%>%
+  distinct() %>% 
+  mutate(maxw = round(maxw, 3), minb = round(minb, 3))
+
+#outcome test
+s_data %>% select(state, w_PPV, b_PPV) %>% 
+  distinct() %>% 
+  mutate(w_PPV = round(w_PPV, 3), b_PPV = round(b_PPV, 3))
+
+#benchmark test
+s_data %>% select(state, w.searchrate, b.searchrate) %>% 
+  distinct() %>% 
+  mutate(w.searchrate = round(w.searchrate, 3), b.searchrate = round(b.searchrate, 3))
+```
+
+
+## Local Municipalities 
+
+This section produces the plot "Overlapping Condition Test for Local Municipalities"
+```{r non-state blobs, echo=FALSE}
+#Plano has no feasible values of x, appears to be a data reporting issue. 
+local_data <- local_data %>%
+   filter(state != "plano")
+
+l.metrics <- list()
+for(i in local_data$state){
+ l.metrics[i] <-list(metrics.contraband(local_data[local_data$state == i,]))
+}
+
+oakland <- l.metrics$oakland
+san_diego <- l.metrics$san_diego
+#san_jose <- l.metrics$san_jose
+hartford <- l.metrics$hartford
+new_orleans <- l.metrics$new_orleans
+charoltte <- l.metrics$charoltte
+greensboro <- l.metrics$greensboro
+raleigh <- l.metrics$raleigh
+winston <- l.metrics$winston
+philadelphia <- l.metrics$philadelphia
+austin <- l.metrics$austin
+
+#we drop plano because they only have 80 total times they found contraband and all the basis for search are consent searches. 
+
+#we drop san_jose because they have no feasible x-values. Likely issues with data quality and reporting. 
+
+local.data <- bind_rows(oakland, san_diego, hartford, new_orleans, charoltte, greensboro, raleigh, winston, philadelphia, austin)
+
+local.data$location <- rep(c("Oakland", "San Diego", "Hartford", "New Orleans", "Charoltte", "Greensboro", "Raleigh", "Winston", "Philadelphia", "Austin"),each=101)
+
+
+local.data <- local.data %>% group_by(location) %>% 
+  mutate(minb=min(p.fa.black, na.rm = T),
+         maxb=max(p.fa.black, na.rm = T),
+         minw=min(p.fa.white, na.rm = T),
+         maxw=max(p.fa.white, na.rm = T)) %>% ungroup()
+
+local.plot <- 
+  ggplot(local.data,aes(x=p.fa.white,y=p.fa.black,fill=location)) +
+  geom_rect(aes(xmin=minw,xmax=maxw, ymin=minb,ymax=maxb)) +
+  ylim(0,.2) + 
+  xlim(0,.2) + 
+  geom_abline() + 
+  xlab("Feasible FA Rate for White Drivers") + 
+  ylab("Feasible FA Rate for Black Drivers")+
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        plot.background = element_rect(fill='transparent', color=NA),
+        axis.text = element_text(size = 10),
+        legend.text = element_text(size = 5),
+        legend.key.size = unit(0.5, "cm"),
+        legend.title = element_text(size = 10))
+
+# ggsave(
+#     paste0(path.to.figures,"local_blob.pdf"),
+#     local.plot,
+#     dpi = 1200
+#   )
+
+local.plot
+```
+
+This section produces the table "Overlapping Condition Test Table for Local Municipalities"
+```{r, echo=F}
+local_data <- local_data %>% 
+  mutate(w.searchrate = w_searches/(w_searches +w_no.searches),
+                                    b.searchrate = b_searches/(b_searches + b_no.searches),
+                                    w_PPV = w_contraband/w_searches,
+                                    b_PPV = b_contraband/b_searches)
+
+#overlapping condition
+local.data %>% dplyr::select(location, maxw, minb)%>% distinct() %>% mutate(maxw = round(maxw, 3),                                                    minb = round(minb, 3))
+
+#outcome
+local_data %>% dplyr::select(state, w_PPV, b_PPV)%>% distinct() %>% mutate(w_PPV = round(w_PPV, 3),                                                  b_PPV = round(b_PPV, 3))
+
+#benchmark
+local_data %>% dplyr::select(state, w.searchrate, b.searchrate)%>% distinct() %>% mutate(w.searchrate = round(w.searchrate, 3),                                   b.searchrate = round(b.searchrate, 3))
+
+```
+
